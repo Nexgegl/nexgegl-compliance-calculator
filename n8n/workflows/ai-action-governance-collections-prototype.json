@@ -1,0 +1,309 @@
+{
+  "name": "AI Action Governance — Collections Prototype",
+  "nodes": [
+    {
+      "id": "node-01",
+      "name": "Webhook — Receive Debt Payload",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "nexgegl-ai-governance-v1",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ai-governance-collections",
+        "responseMode": "responseNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "node-02",
+      "name": "Validate Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 300],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\n\nconst errors = [];\n\nif (!body.tenant_id) errors.push('tenant_id is required');\nif (!body.source_type) errors.push('source_type is required');\nif (body.source_type && !['AI','HUMAN','SYSTEM'].includes(body.source_type)) {\n  errors.push('source_type must be AI, HUMAN, or SYSTEM');\n}\nif (body.amount !== undefined && isNaN(Number(body.amount))) {\n  errors.push('amount must be a number');\n}\n\nreturn [{\n  json: {\n    ...body,\n    _validation: {\n      isValid: errors.length === 0,\n      errors,\n      validatedAt: new Date().toISOString()\n    }\n  }\n}];"
+      }
+    },
+    {
+      "id": "node-03",
+      "name": "Is Payload Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [720, 300],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond-001",
+              "leftValue": "={{ $json._validation.isValid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "node-04",
+      "name": "Respond 400 — Invalid Payload",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [960, 120],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: false, error: 'Validation failed', errors: $json._validation.errors, timestamp: new Date().toISOString() }) }}",
+        "options": {
+          "responseCode": 400
+        }
+      }
+    },
+    {
+      "id": "node-05",
+      "name": "Generate action_request_id",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [960, 480],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "function uuidv4() {\n  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {\n    const r = Math.random() * 16 | 0;\n    const v = c === 'x' ? r : (r & 0x3 | 0x8);\n    return v.toString(16);\n  });\n}\n\nconst body = $input.first().json;\nconst actionRequestId = uuidv4();\nconst decisionId = uuidv4();\nconst now = new Date().toISOString();\n\nconst insertPayload = {\n  id: actionRequestId,\n  tenant_id: body.tenant_id,\n  source_type: body.source_type || 'AI',\n  customer_id: body.customer_id || null,\n  customer_name: body.customer_name || null,\n  amount: body.amount ? Number(body.amount) : null,\n  aging_bucket: body.aging_bucket || null,\n  risk_level: body.risk_level || null,\n  policy_context: body.policy_context || {},\n  status: 'PENDING',\n  evidence: { source: 'webhook', receivedAt: now }\n};\n\nreturn [{\n  json: {\n    ...body,\n    action_request_id: actionRequestId,\n    decision_id: decisionId,\n    insert_payload: insertPayload,\n    prepared_at: now\n  }\n}];"
+      }
+    },
+    {
+      "id": "node-06",
+      "name": "POST action_request — PENDING",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1200, 480],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/ai_action_requests",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" },
+            { "name": "Prefer",        "value": "return=representation" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.insert_payload) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "node-07",
+      "name": "Call OpenAI — Collection Recommendation",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1440, 480],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.OPENAI_API_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'gpt-4o-mini', messages: [{ role: 'system', content: 'You are a debt collections compliance officer. Recommend ONE action from: CALL_CUSTOMER, SEND_NOTICE, LEGAL_REFERRAL, PAYMENT_PLAN, WRITE_OFF, ESCALATE_MANAGER. Respond ONLY with valid JSON: {\"recommended_action\": \"<action>\", \"reason\": \"<one sentence>\", \"confidence\": <0.0-1.0>}' }, { role: 'user', content: 'Customer: ' + ($('Generate action_request_id').first().json.customer_name || 'Unknown') + '. Debt amount: SAR ' + ($('Generate action_request_id').first().json.amount || 0) + '. Aging bucket: ' + ($('Generate action_request_id').first().json.aging_bucket || 'unknown') + '. Risk level: ' + ($('Generate action_request_id').first().json.risk_level || 'MEDIUM') + '. Policy context: ' + JSON.stringify($('Generate action_request_id').first().json.policy_context || {}) }], temperature: 0.2, max_tokens: 200 }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "node-08",
+      "name": "Parse AI Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1680, 480],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const aiResponse = $input.first().json;\nconst context = $('Generate action_request_id').first().json;\n\nlet recommendedAction = 'ESCALATE_MANAGER';\nlet aiReason = 'AI recommendation unavailable';\nlet confidence = 0.5;\n\ntry {\n  const content = aiResponse.choices[0].message.content;\n  const parsed = JSON.parse(content);\n  recommendedAction = parsed.recommended_action || recommendedAction;\n  aiReason = parsed.reason || aiReason;\n  confidence = typeof parsed.confidence === 'number' ? parsed.confidence : confidence;\n} catch(e) {\n  aiReason = 'Parse error: ' + String(e.message).substring(0, 100);\n}\n\nreturn [{\n  json: {\n    ...context,\n    recommended_action: recommendedAction,\n    ai_reason: aiReason,\n    ai_confidence: confidence\n  }\n}];"
+      }
+    },
+    {
+      "id": "node-09",
+      "name": "KFSA Policy Evaluator",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1920, 480],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const data = $input.first().json;\n\nconst amount = Number(data.amount) || 0;\nconst riskLevel = (data.risk_level || '').toUpperCase();\nconst agingBucket = (data.aging_bucket || '').trim();\nconst customerId = data.customer_id;\nconst customerName = data.customer_name;\nconst policyContext = data.policy_context || {};\nconst legalReady = policyContext.legal_ready !== undefined\n  ? Boolean(policyContext.legal_ready)\n  : false;\n\nlet verdict = 'ALERT';\nlet policyRule = 'DEFAULT_ALERT';\nlet policyNotes = [];\n\n// Rule 1: Missing customer identification\nif (!customerId || !customerName) {\n  verdict = 'FIX';\n  policyRule = 'MISSING_CUSTOMER_DATA';\n  policyNotes.push('customer_id or customer_name missing — required for collections action');\n}\n// Rule 2: Aged +180 AND not legal ready\nelse if (agingBucket === '+180' && !legalReady) {\n  verdict = 'KILL';\n  policyRule = 'LEGAL_NOT_READY_AGED_180';\n  policyNotes.push('Debt aged +180 days and legal_ready is false — blocked by KFSA policy');\n}\n// Rule 3: High value + HIGH risk\nelse if (amount > 500000 && riskLevel === 'HIGH') {\n  verdict = 'ALERT';\n  policyRule = 'HIGH_VALUE_HIGH_RISK';\n  policyNotes.push('Amount exceeds SAR 500,000 with HIGH risk — requires senior review');\n}\n// Rule 4: Low/medium risk within threshold\nelse if (amount <= 500000 && ['LOW', 'MEDIUM'].includes(riskLevel)) {\n  verdict = 'SCALE';\n  policyRule = 'WITHIN_AUTO_THRESHOLD';\n  policyNotes.push('Risk and amount within automated processing limits');\n}\n// Default fallback\nelse {\n  verdict = 'ALERT';\n  policyRule = 'DEFAULT_ALERT';\n  policyNotes.push('No specific rule matched — defaulting to escalation');\n}\n\nconst decisionCode = 'KFSA-MOCK-' + Date.now();\n\nreturn [{\n  json: {\n    ...data,\n    verdict,\n    policy_rule: policyRule,\n    policy_notes: policyNotes,\n    decision_code: decisionCode,\n    evaluated_at: new Date().toISOString()\n  }\n}];"
+      }
+    },
+    {
+      "id": "node-10",
+      "name": "Map Verdict to Status",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2160, 480],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const data = $input.first().json;\n\nconst verdictStatusMap = {\n  SCALE: 'APPROVED',\n  FIX:   'NEEDS_FIX',\n  ALERT: 'ESCALATED',\n  KILL:  'BLOCKED'\n};\n\nconst status = verdictStatusMap[data.verdict] || 'ESCALATED';\nconst executionAllowed = status === 'APPROVED';\n\nreturn [{\n  json: {\n    ...data,\n    status,\n    execution_allowed: executionAllowed,\n    decision_required: true\n  }\n}];"
+      }
+    },
+    {
+      "id": "node-11",
+      "name": "PATCH action_request — Verdict + Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [2400, 480],
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/ai_action_requests?id=eq.{{ $json.action_request_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" },
+            { "name": "Prefer",        "value": "return=representation" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ recommended_action: $json.recommended_action, ai_reason: $json.ai_reason, verdict: $json.verdict, status: $json.status, decision_id: $json.decision_id, decision_code: $json.decision_code, evidence: { policy_rule: $json.policy_rule, policy_notes: $json.policy_notes, ai_confidence: $json.ai_confidence, evaluated_at: $json.evaluated_at } }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "node-12",
+      "name": "POST Audit Log Entry",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [2640, 480],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/ai_action_audit_logs",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" },
+            { "name": "Prefer",        "value": "return=representation" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ tenant_id: $('Map Verdict to Status').first().json.tenant_id, action_request_id: $('Map Verdict to Status').first().json.action_request_id, event_type: 'GOVERNANCE_DECISION', payload: { verdict: $('Map Verdict to Status').first().json.verdict, status: $('Map Verdict to Status').first().json.status, decision_code: $('Map Verdict to Status').first().json.decision_code, policy_rule: $('Map Verdict to Status').first().json.policy_rule, recommended_action: $('Map Verdict to Status').first().json.recommended_action, ai_confidence: $('Map Verdict to Status').first().json.ai_confidence, execution_allowed: $('Map Verdict to Status').first().json.execution_allowed } }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "node-13",
+      "name": "Build Final Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2880, 480],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const ctx = $('Map Verdict to Status').first().json;\n\nreturn [{\n  json: {\n    action_request_id: ctx.action_request_id,\n    recommended_action: ctx.recommended_action,\n    verdict: ctx.verdict,\n    status: ctx.status,\n    decision_required: true,\n    decision_code: ctx.decision_code,\n    execution_allowed: ctx.execution_allowed,\n    evidence_logged: true,\n    ai_reason: ctx.ai_reason,\n    timestamp: new Date().toISOString()\n  }\n}];"
+      }
+    },
+    {
+      "id": "node-14",
+      "name": "Respond 200 — Governance Decision",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [3120, 480],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseCode": 200
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Webhook — Receive Debt Payload": {
+      "main": [
+        [{ "node": "Validate Payload", "type": "main", "index": 0 }]
+      ]
+    },
+    "Validate Payload": {
+      "main": [
+        [{ "node": "Is Payload Valid?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Is Payload Valid?": {
+      "main": [
+        [{ "node": "Generate action_request_id", "type": "main", "index": 0 }],
+        [{ "node": "Respond 400 — Invalid Payload", "type": "main", "index": 0 }]
+      ]
+    },
+    "Generate action_request_id": {
+      "main": [
+        [{ "node": "POST action_request — PENDING", "type": "main", "index": 0 }]
+      ]
+    },
+    "POST action_request — PENDING": {
+      "main": [
+        [{ "node": "Call OpenAI — Collection Recommendation", "type": "main", "index": 0 }]
+      ]
+    },
+    "Call OpenAI — Collection Recommendation": {
+      "main": [
+        [{ "node": "Parse AI Response", "type": "main", "index": 0 }]
+      ]
+    },
+    "Parse AI Response": {
+      "main": [
+        [{ "node": "KFSA Policy Evaluator", "type": "main", "index": 0 }]
+      ]
+    },
+    "KFSA Policy Evaluator": {
+      "main": [
+        [{ "node": "Map Verdict to Status", "type": "main", "index": 0 }]
+      ]
+    },
+    "Map Verdict to Status": {
+      "main": [
+        [{ "node": "PATCH action_request — Verdict + Status", "type": "main", "index": 0 }]
+      ]
+    },
+    "PATCH action_request — Verdict + Status": {
+      "main": [
+        [{ "node": "POST Audit Log Entry", "type": "main", "index": 0 }]
+      ]
+    },
+    "POST Audit Log Entry": {
+      "main": [
+        [{ "node": "Build Final Response", "type": "main", "index": 0 }]
+      ]
+    },
+    "Build Final Response": {
+      "main": [
+        [{ "node": "Respond 200 — Governance Decision", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "nexgegl-ai-gov-v1-0-prototype",
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "instanceId": "nexgegl-compliance-calculator"
+  },
+  "tags": ["nexgegl", "governance", "collections", "ai", "kfsa"]
+}

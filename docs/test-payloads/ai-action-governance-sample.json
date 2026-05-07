@@ -1,0 +1,106 @@
+{
+  "_meta": {
+    "description": "Test payloads for AI Action Governance — Collections Prototype",
+    "endpoint": "POST {n8n_base_url}/webhook/ai-governance-collections",
+    "content_type": "application/json",
+    "note": "Send the 'payload' object as the POST body. '_description' and 'expected_*' fields are for documentation only."
+  },
+
+  "scenario_1_SCALE_auto_approve": {
+    "_description": "Low risk, manageable amount → SCALE → APPROVED → execution_allowed: true",
+    "expected_verdict": "SCALE",
+    "expected_status": "APPROVED",
+    "expected_execution_allowed": true,
+    "payload": {
+      "tenant_id": "demo-tenant",
+      "source_type": "AI",
+      "customer_id": "CUST-1001",
+      "customer_name": "شركة الاختبار للتجارة",
+      "amount": 275000,
+      "aging_bucket": "90-180",
+      "risk_level": "MEDIUM",
+      "policy_context": {
+        "legal_ready": true,
+        "previous_contact_attempts": 3,
+        "has_dispute": false
+      }
+    }
+  },
+
+  "scenario_2_ALERT_high_value": {
+    "_description": "Amount > 500,000 + HIGH risk → ALERT → ESCALATED → execution_allowed: false",
+    "expected_verdict": "ALERT",
+    "expected_status": "ESCALATED",
+    "expected_execution_allowed": false,
+    "payload": {
+      "tenant_id": "demo-tenant",
+      "source_type": "AI",
+      "customer_id": "CUST-1002",
+      "customer_name": "مجموعة الخليج للاستثمار",
+      "amount": 750000,
+      "aging_bucket": "+90",
+      "risk_level": "HIGH",
+      "policy_context": {
+        "legal_ready": true,
+        "previous_contact_attempts": 7,
+        "has_dispute": false
+      }
+    }
+  },
+
+  "scenario_3_KILL_aged_not_legal_ready": {
+    "_description": "aging_bucket=+180 AND legal_ready=false → KILL → BLOCKED → execution_allowed: false",
+    "expected_verdict": "KILL",
+    "expected_status": "BLOCKED",
+    "expected_execution_allowed": false,
+    "payload": {
+      "tenant_id": "demo-tenant",
+      "source_type": "AI",
+      "customer_id": "CUST-1003",
+      "customer_name": "شركة النور التجارية",
+      "amount": 120000,
+      "aging_bucket": "+180",
+      "risk_level": "HIGH",
+      "policy_context": {
+        "legal_ready": false,
+        "previous_contact_attempts": 12,
+        "has_dispute": true
+      }
+    }
+  },
+
+  "scenario_4_FIX_missing_pii": {
+    "_description": "customer_id and customer_name null → FIX → NEEDS_FIX → execution_allowed: false",
+    "expected_verdict": "FIX",
+    "expected_status": "NEEDS_FIX",
+    "expected_execution_allowed": false,
+    "payload": {
+      "tenant_id": "demo-tenant",
+      "source_type": "SYSTEM",
+      "customer_id": null,
+      "customer_name": null,
+      "amount": 45000,
+      "aging_bucket": "+60",
+      "risk_level": "MEDIUM",
+      "policy_context": {
+        "legal_ready": false,
+        "previous_contact_attempts": 0,
+        "has_dispute": false
+      }
+    }
+  },
+
+  "scenario_5_INVALID_missing_tenant_id": {
+    "_description": "Missing tenant_id → 400 validation error — workflow rejects before DB write",
+    "expected_http_status": 400,
+    "expected_verdict": null,
+    "payload": {
+      "source_type": "AI",
+      "customer_id": "CUST-1005",
+      "customer_name": "شركة الاختبار",
+      "amount": 10000,
+      "aging_bucket": "+30",
+      "risk_level": "LOW"
+    }
+  }
+}
